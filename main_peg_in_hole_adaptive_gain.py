@@ -119,7 +119,14 @@ desired_pose = np.array([0.0, 0.0, 0.0])  # [x, y, theta], z는 고정이므로 
 desired_features, desired_uv = get_features(desired_pose, rim_world, FOCAL_LENGTH)
 
 # 초기 포즈는 기존과 유사
-camera_pose = np.array([-2.0, 2.0, np.deg2rad(45.0)])
+# camera_pose = np.array([-2.0, 2.0, np.deg2rad(45.0)])
+# 초기 포즈를 랜덤으로 설정
+np.random.seed()  # 매번 다른 결과
+init_x = np.random.uniform(-3.0, 3.0)       # X 범위
+init_y = np.random.uniform(-1.0, 4.0)       # Y 범위
+init_theta = np.random.uniform(-np.pi, np.pi)  # Yaw 각도
+
+camera_pose = np.array([init_x, init_y, init_theta])
 
 # --- 기록 ---
 pose_history = [camera_pose.copy()]
@@ -141,7 +148,7 @@ for step in range(TOTAL_STEPS):
 
     # 게인 스케줄링 (Gain Scheduling)
     LAMBDA_MAX = 2.0
-    LAMBDA_MIN = 0.2
+    LAMBDA_MIN = 0.5
     # 에러가 클 때(e.g., > 50)는 MAX, 작을 때(e.g., < 5)는 MIN으로 점차 감소
     current_lambda = max(LAMBDA_MIN, min(LAMBDA_MAX, LAMBDA_MAX * (error_norm / 50.0)))
 
@@ -173,7 +180,8 @@ feature_history = np.array(feature_history, dtype=object)  # list of arrays
 feat_err_components = np.array(feat_err_components)
 
 # --- 시각화 ---
-fig = plt.figure(figsize=(16, 8))
+# fig = plt.figure(figsize=(16, 8))
+fig = plt.figure(figsize=(20, 12), dpi=150)
 ax1 = fig.add_subplot(2, 2, 1) # World view
 ax2 = fig.add_subplot(2, 2, 2) # Camera view
 ax3 = fig.add_subplot(2, 1, 2) # Error plot
@@ -182,13 +190,41 @@ ax3 = fig.add_subplot(2, 1, 2) # Error plot
 ax1.set_title("World View (Top-down)")
 ax1.set_xlabel("X (m)")
 ax1.set_ylabel("Y (m)")
+
 ax1.grid(True); ax1.set_aspect('equal')
-ax1.plot(rim_center_world[0], rim_center_world[1], 'g*', markersize=15, label="Rim Center (World)")
-# 전체 경로는 미리 점선으로 그려둠
+
+# World View axis를 trajectory에 맞춰 자동 설정
+x_min, x_max = np.min(pose_history[:,0]), np.max(pose_history[:,0])
+y_min, y_max = np.min(pose_history[:,1]), np.max(pose_history[:,1])
+
+# 여유 margin 주기 (10%)
+margin_x = 0.1 * (x_max - x_min if x_max > x_min else 1.0)
+margin_y = 0.1 * (y_max - y_min if y_max > y_min else 1.0)
+
+ax1.set_xlim(x_min - margin_x, x_max + margin_x)
+ax1.set_ylim(y_min - margin_y, y_max + margin_y)
+
+peg_radius = 0.5  # rim 반지름
+
+# Rim (고정 target hole)
+theta = np.linspace(0, 2*np.pi, 200)
+rim_x = rim_center_world[0] + peg_radius*np.cos(theta)
+rim_y = rim_center_world[1] + peg_radius*np.sin(theta)
+ax1.plot(rim_x, rim_y, 'g-', lw=2, label="Rim (Target Hole)")
+
+# Rim center marker
+ax1.plot(rim_center_world[0], rim_center_world[1], 'g*', markersize=15, label="Rim Center")
+
+# 전체 경로 (점선)
 ax1.plot(pose_history[:,0], pose_history[:,1], 'b--', lw=1, alpha=0.5, label="Full Path")
-# 현재 경로와 카메라 위치를 나타낼 artist 핸들을 미리 생성
+
+# 현재 경로와 카메라 위치 핸들
 current_path_plot, = ax1.plot([], [], 'b-', lw=2, label="Robot Path")
 camera_arrow = ax1.arrow(0, 0, 0.1, 0.1, head_width=0.15, fc='r', ec='r', label="Camera Pose")
+
+# Peg body (gripper가 들고 있는 원통) 핸들
+peg_body_plot, = ax1.plot([], [], 'm-', lw=2, label="Gripper Peg")
+
 ax1.legend()
 ax1.axis([-3, 3, -1, 4])
 
@@ -204,7 +240,7 @@ ax2.plot(des_uv[:,0], des_uv[:,1], 'r.', markersize=2, label="Desired Rim (s*)")
 # 현재 타원을 업데이트할 artist 핸들을 미리 생성
 current_rim_plot, = ax2.plot([], [], 'b.', markersize=2, label="Current Rim (s)")
 ax2.legend()
-ax2_window_size = 800
+ax2_window_size = 200
 ax2.axis([-ax2_window_size, ax2_window_size, -ax2_window_size, ax2_window_size])
 
 
@@ -213,7 +249,8 @@ ax3.set_title("Feature Error Norm & Components")
 ax3.set_xlabel("Time (s)")
 ax3.set_ylabel("Error")
 ax3.grid(True)
-times = np.arange(len(pose_history)) * DT
+# times = np.arange(len(pose_history)) * DT
+times = np.arange(len(error_history)) * DT
 # 에러 그래프들을 그리고 핸들을 변수에 저장
 line_err_norm, = ax3.plot(times, error_history, label="||e||")
 line_err_u, = ax3.plot(times, feat_err_components[:,0], label="|u0 - u0*| [px]")
@@ -227,21 +264,24 @@ ax3.set_ylim(0, max(1.0, np.max(error_history)*1.1))
 
 # 애니메이션 함수 정의
 def animate(i):
-    """애니메이션의 각 프레임(i)을 업데이트하는 함수"""
     # World View 업데이트
     current_path_plot.set_data(pose_history[:i+1, 0], pose_history[:i+1, 1])
     x, y, th = pose_history[i]
-    # 화살표는 set_data가 없어 dx, dy를 직접 설정해야 함
-    camera_arrow.set_data(x=x, y=y, dx=0.3*np.cos(th), dy=0.3*np.sin(th))
-    
-    # Camera View 업데이트
-    # feature_history는 uv 좌표들의 list이므로 인덱싱으로 접근
-    if i < len(feature_history):
-      uv_i = feature_history[i]
-      current_rim_plot.set_data(uv_i[:,0], uv_i[:,1])
 
-    # Error Plot 업데이트 (이미 전체 데이터가 그려져 있으므로 실제로는 불필요하지만,
-    # 실시간 데이터 스트리밍을 가정한다면 아래와 같이 set_data를 사용할 수 있음)
+    # 카메라 방향 화살표
+    camera_arrow.set_data(x=x, y=y, dx=0.3*np.cos(th), dy=0.3*np.sin(th))
+
+    # Peg body (gripper가 들고 있는 원통) 업데이트
+    peg_x = x + peg_radius*np.cos(theta)
+    peg_y = y + peg_radius*np.sin(theta)
+    peg_body_plot.set_data(peg_x, peg_y)
+
+    # Camera View 업데이트
+    if i < len(feature_history):
+        uv_i = feature_history[i]
+        current_rim_plot.set_data(uv_i[:,0], uv_i[:,1])
+
+    # Error Plot 업데이트
     t_i = times[:i+1]
     line_err_norm.set_data(t_i, error_history[:i+1])
     line_err_u.set_data(t_i, feat_err_components[:i+1, 0])
@@ -249,9 +289,9 @@ def animate(i):
     line_err_area.set_data(t_i, feat_err_components[:i+1, 2])
     line_err_alpha.set_data(t_i, np.rad2deg(feat_err_components[:i+1, 3]))
 
-    # blit=True를 위해 업데이트된 모든 artist들을 튜플로 반환
-    return (current_path_plot, camera_arrow, current_rim_plot, 
-            line_err_norm, line_err_u, line_err_v, line_err_area, line_err_alpha)
+    return (current_path_plot, camera_arrow, peg_body_plot,
+            current_rim_plot, line_err_norm, line_err_u,
+            line_err_v, line_err_area, line_err_alpha)
 
 # 애니메이션 실행
 ani = FuncAnimation(fig, animate, frames=len(pose_history), interval=DT*1000, 
@@ -259,7 +299,12 @@ ani = FuncAnimation(fig, animate, frames=len(pose_history), interval=DT*1000,
 
 print("애니메이션을 'ibvs_ellipse_schedule.mp4' 로 저장을 시도합니다...")
 try:
-    ani.save('ibvs_ellipse_schedule.mp4', writer='ffmpeg', fps=30, dpi=100)
+    sim_duration = len(pose_history) * DT     # 시뮬레이션 실제 시간 (초)
+    fps = int(len(pose_history) / sim_duration)  # 초당 프레임 수 (≈ 1/DT)
+
+    ani.save('ibvs_ellipse_schedule.mp4',
+            writer='ffmpeg',
+            fps=fps, dpi=100)
     print("저장이 완료되었습니다.")
 except Exception as ex:
     print(f"[Info] mp4 저장 실패 (ffmpeg 미설치 등): {ex}")
