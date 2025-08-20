@@ -212,7 +212,6 @@ times = np.arange(len(error_history)) * DT
 line_err_norm, = ax3.plot(times, error_history, label="||e||")
 line_err_u, = ax3.plot(times, feat_err_components[:,0], label="|u0 - u0*| [px]")
 line_err_v, = ax3.plot(times, feat_err_components[:,1], label="|v0 - v0*| [px]")
-line_err_area, = ax3.plot(times, feat_err_components[:,2], label="|log(ab)-log(ab)*|")
 ax3.legend()
 # Y축 범위는 전체 에러 기록을 바탕으로 설정
 ax3.set_ylim(0, max(1.0, np.max(error_history)*1.1))

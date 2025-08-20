@@ -80,11 +80,9 @@ def numeric_interaction_matrix_3dof(pose_xyth, rim_w, fpx, eps_t=1e-4, eps_r=1e-
 def simulate_ibvs(k: int = 5):
     rim_center_world = np.array([0,0,2.5])
     rim_world = make_rim_world(rim_center_world,0.5,20,5,200)
-    desired_pose = np.array([0.0,0.0,0.0])
-    desired_features,_ = get_features(desired_pose, rim_world, FOCAL_LENGTH)
 
     all_pose_histories, all_feature_histories = [], []
-    frames_per_trial = []
+    frames_per_trial, all_errors = [], []   # <-- error history 저장
 
     for trial in range(k):
         init_pose = np.array([
@@ -94,30 +92,29 @@ def simulate_ibvs(k: int = 5):
         ])
         camera_pose = init_pose.copy()
         pose_history, feature_history = [camera_pose.copy()], []
+        error_history = []   # trial별 error 기록
+
+        desired_pose = np.array([0.0,0.0,0.0])
+        # desired_pose = np.array([0.0, 0.0, init_pose[2]])  # 초기 yaw를 목표 yaw로 고정
+        desired_features,_ = get_features(desired_pose, rim_world, FOCAL_LENGTH)
 
         for step in range(TOTAL_STEPS):
             s, uv = get_features(camera_pose, rim_world, FOCAL_LENGTH)
             feature_history.append(uv)
 
-            # circle feature error
             e = feature_error(s, desired_features)
-
-            # yaw 오차 추가 (state 기반)
             yaw_err = wrap_angle(camera_pose[2] - desired_pose[2])
-
             error_norm = np.linalg.norm(e) + abs(yaw_err)
-            lam = max(LAMBDA_MIN, min(LAMBDA_MAX, LAMBDA_MAX*(error_norm/50)))
+            error_history.append(error_norm)   # 기록
 
+            lam = max(LAMBDA_MIN, min(LAMBDA_MAX, LAMBDA_MAX*(error_norm/50)))
             if error_norm < 1.0:
                 break
 
-            # interaction matrix (이제 3x2만 유효 → tx, ty / yaw 따로)
             L = numeric_interaction_matrix_3dof(camera_pose, rim_world, FOCAL_LENGTH)
-            # L 크기 맞춰서 translation만 학습
-            L = L[:3, :2]   # [u0,v0,log(r^2)] wrt [tx,ty]
-
-            v_trans = -lam * (np.linalg.pinv(L) @ e)  # 2D translation velocity
-            v_yaw   = -lam * 0.5 * yaw_err            # yaw velocity (gain 0.5 임의)
+            L = L[:3, :2]
+            v_trans = -lam * (np.linalg.pinv(L) @ e)
+            v_yaw   = -lam * 0.5 * yaw_err
 
             x,y,th = camera_pose
             c,s = np.cos(th), np.sin(th)
@@ -132,12 +129,15 @@ def simulate_ibvs(k: int = 5):
         all_pose_histories.append(np.array(pose_history))
         all_feature_histories.append(np.array(feature_history, dtype=object))
         frames_per_trial.append(len(pose_history))
+        all_errors.append(error_history)   # trial별 error 기록 완료
 
     total_frames = sum(frames_per_trial)
 
     # --- Visualization ---
-    fig = plt.figure(figsize=(20,12), dpi=150)
-    ax1 = fig.add_subplot(1,2,1); ax2 = fig.add_subplot(1,2,2)
+    fig = plt.figure(figsize=(24,12), dpi=150)
+    ax1 = fig.add_subplot(1,3,1)   # World
+    ax2 = fig.add_subplot(1,3,2)   # Camera
+    ax3 = fig.add_subplot(1,3,3)   # Loss plot
 
     ax1.set_title("World View (Top-down)")
     ax1.set_xlabel("X (m)"); ax1.set_ylabel("Y (m)")
@@ -184,6 +184,15 @@ def simulate_ibvs(k: int = 5):
     rim_plot, = ax2.plot([],[],'b.',ms=2,label="Current Rim")
     ax2.legend(); ax2.set_xlim(-200,200); ax2.set_ylim(-200,200)
 
+    # Loss plot
+    ax3.set_title("Loss over Time")
+    ax3.set_xlabel("Step")
+    ax3.set_ylabel("Error Norm")
+    ax3.grid(True)
+    for trial_idx, err_hist in enumerate(all_errors):
+        ax3.plot(err_hist, label=f"Trial {trial_idx+1}")
+    ax3.legend()
+
     # Animate
     def animate(i):
         trial_idx, offset = 0, i
@@ -220,4 +229,4 @@ def simulate_ibvs(k: int = 5):
     plt.show()
 
 # 실행
-simulate_ibvs(1)  # k=5가 디폴트
+simulate_ibvs(3)  # k=5가 디폴트
