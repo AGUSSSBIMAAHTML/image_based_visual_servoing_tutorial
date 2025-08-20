@@ -241,22 +241,22 @@ def animate(i):
     line_err_norm.set_data(t_i, error_history[:i+1])
     line_err_u.set_data(t_i, feat_err_components[:i+1, 0])
     line_err_v.set_data(t_i, feat_err_components[:i+1, 1])
-    line_err_area.set_data(t_i, feat_err_components[:i+1, 2])
 
     return (current_path_plot, camera_arrow, peg_body_plot,
             current_rim_plot, line_err_norm, line_err_u,
-            line_err_v, line_err_area)
+            line_err_v)
 
 # 애니메이션 실행
 ani = FuncAnimation(fig, animate, frames=len(pose_history), interval=DT*1000, 
                     blit=True, repeat=False)
 
-print("애니메이션을 'ibvs_ellipse_schedule.mp4' 로 저장을 시도합니다...")
+video_filename = 'ibvs_rim_schedule.mp4'
+print(f"Trying to save '{video_filename}' ...")
 try:
     sim_duration = len(pose_history) * DT     # 시뮬레이션 실제 시간 (초)
     fps = int(len(pose_history) / sim_duration)  # 초당 프레임 수 (≈ 1/DT)
 
-    ani.save('ibvs_ellipse_schedule.mp4',
+    ani.save(video_filename,
             writer='ffmpeg',
             fps=fps, dpi=100)
     print("저장이 완료되었습니다.")

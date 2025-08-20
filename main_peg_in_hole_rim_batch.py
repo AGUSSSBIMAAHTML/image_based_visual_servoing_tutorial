@@ -225,8 +225,12 @@ def simulate_ibvs(k: int = 5):
     ani = FuncAnimation(fig, animate, frames=total_frames,
                         interval=DT*1000, blit=True, repeat=False)
 
-    ani.save("ibvs_multi_trials.mp4", writer="ffmpeg", fps=int(1/DT), dpi=150)
+    video_filename = 'ibvs_rim.mp4'
+    print(f"Trying to save '{video_filename}' ...")
+    ani.save(video_filename, writer="ffmpeg", fps=int(1/DT), dpi=150)
     plt.show()
 
 # 실행
-simulate_ibvs(3)  # k=5가 디폴트
+num_random_initial_trials = 5
+if __name__ == "__main__":
+    simulate_ibvs(num_random_initial_trials)  # num_random_initial_trials 번의 시뮬레이션 실행
