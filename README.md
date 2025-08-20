@@ -23,9 +23,9 @@ The following pipeline illustrates the overall IBVS control flow for the peg-in-
 
 ### Peg-in-Hole with Pentagon Hole
 The end-effector is guided to align a peg with a **pentagon-shaped hole**.  
-![Pentagon Trajectory](result_videos/ibvs_pentagon.gif)
+![Pentagon Trajectory](result_videos/main_peg_in_hole_pentagon.gif)
 
 ### Peg-in-Hole with Circular Rim
 The end-effector aligns the peg with a **circular rim hole**, which appears as an ellipse in the image plane due to perspective projection.  
-![Rim Multiples](result_videos/ibvs_rim_multiples.gif)
+![Rim Multiples](result_videos/main_peg_in_hole_rim_multiples.gif)
 
