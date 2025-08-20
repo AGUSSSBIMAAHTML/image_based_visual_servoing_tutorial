@@ -141,6 +141,11 @@ def simulate_ibvs(k: int = 5):
     # Artists
     path_line, = ax1.plot([],[],'b-',lw=2,label="Path")
     peg_line,  = ax1.plot([],[],'m-',lw=2,label="Gripper Peg")
+    # camera_arrow = ax1.quiver([],[],[],[],color='r',angles='xy',
+    #                           scale_units='xy',scale=1,width=0.01,label="Camera Heading")
+    camera_arrow = ax1.quiver([0], [0], [1], [0],
+                            color='r', angles='xy',
+                            scale_units='xy', scale=1, width=0.02)
     info_text = ax1.text(0.02, 0.95, "", transform=ax1.transAxes,
                          ha="left", va="top", fontsize=12,
                          bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.6))
@@ -164,8 +169,10 @@ def simulate_ibvs(k: int = 5):
 
         # World view update
         path_line.set_data(pose_history[:offset+1,0], pose_history[:offset+1,1])
-        x,y,_ = pose_history[offset]
+        x,y,th = pose_history[offset]
         peg_line.set_data(x+0.5*np.cos(theta), y+0.5*np.sin(theta))
+        camera_arrow.set_offsets([x,y])
+        camera_arrow.set_UVC(0.5*np.cos(th),0.5*np.sin(th))
 
         # Camera view update
         uv = feature_history[offset]
@@ -178,7 +185,7 @@ def simulate_ibvs(k: int = 5):
         lam = max(LAMBDA_MIN, min(LAMBDA_MAX, LAMBDA_MAX*(error_norm/50)))
         info_text.set_text(f"Trial {trial_idx+1}/{k}\nStep {offset}\nError: {error_norm:.2f}\nλ: {lam:.2f}")
 
-        return path_line, peg_line, rim_plot, info_text
+        return path_line, peg_line, rim_plot, camera_arrow, info_text
 
     ani = FuncAnimation(fig, animate, frames=total_frames,
                         interval=DT*1000, blit=True, repeat=False)
@@ -187,5 +194,4 @@ def simulate_ibvs(k: int = 5):
     plt.show()
 
 # 실행
-num_random_trials = 5
-simulate_ibvs(num_random_trials)  # k=5로 디폴트 설정
+simulate_ibvs(1)  # k=5가 디폴트
