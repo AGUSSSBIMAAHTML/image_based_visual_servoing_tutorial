@@ -9,18 +9,23 @@ TOTAL_STEPS = int(SIM_TIME / DT)
 FOCAL_LENGTH = 500.0
 LAMBDA_MAX, LAMBDA_MIN = 2.0, 0.5
 K_YAW = 0.5   # yaw proportional gain
+# [Ref] λ 게인: ė = -λ e 형태의 지수수렴 설계 (Sec. 34.1, Eq. (34.3)~(34.4)).
+#      적응/스케줄형 λ는 실무적 튜닝에 해당 (Sec. 34.1 논의).
 
 # --- Helpers (rotations) ---
 def wrap_angle(a: float) -> float:
+    # [Ref] 각도 wrap은 구현 디테일. 오차 정의 e = s - s* 의 안정적 감소에 도움 (Sec. 34.1).
     return (a + np.pi) % (2*np.pi) - np.pi
 
 def Rz(yaw: float) -> np.ndarray:
+    # [Ref] 좌표계 회전. 카메라 twist v_c와 ṡ = L_s v_c 연결을 구현할 때 필수 (Eq. (34.2)).
     c, s = np.cos(yaw), np.sin(yaw)
     return np.array([[ c,  s, 0.0],
                      [-s,  c, 0.0],
                      [0.0, 0.0, 1.0]])
 
 def Rz2(yaw: float) -> np.ndarray:
+    # [Ref] 2D 회전 행렬 (world top-down 표시용). 시각화 유틸.
     c, s = np.cos(yaw), np.sin(yaw)
     return np.array([[c, -s],
                      [s,  c]])
@@ -28,6 +33,7 @@ def Rz2(yaw: float) -> np.ndarray:
 # --- Geometry: tilted plane N-gon in world ---
 def make_ngon_world(center_w, radius=0.5, tilt_rx_deg=20.0, tilt_ry_deg=5.0, n_sides=5):
     """Return N polygon vertices on a tilted plane around center_w."""
+    # [Ref] 점/선/모멘트 등 다양한 피처 사용 가능 (Sec. 34.2.7).
     rx = np.deg2rad(tilt_rx_deg); ry = np.deg2rad(tilt_ry_deg)
     c,s = np.cos, np.sin
     Rx = np.array([[1,0,0],[0,c(rx),-s(rx)],[0,s(rx),c(rx)]])
@@ -38,6 +44,8 @@ def make_ngon_world(center_w, radius=0.5, tilt_rx_deg=20.0, tilt_ry_deg=5.0, n_s
     return (R_plane @ poly_local.T).T + center_w  # (N,3)
 
 def project_points_to_image(pts_w, pose_xyth, fpx):
+    # [Ref] 핀홀 투영: (x = X/Z, y = Y/Z) → (u = f x, v = f y).
+    #      점 피처 s = [u,v,…]의 시공간 변화는 ṡ = L_s v_c 로 표현 (Eq. (34.2), (34.11)~(34.12)).
     x, y, th = pose_xyth
     Rcw = Rz(th).T
     tcw = -Rcw @ np.array([x, y, 0.0])
@@ -48,18 +56,24 @@ def project_points_to_image(pts_w, pose_xyth, fpx):
 
 # --- Features (pentagon: 5 vertices -> 10D feature) ---
 def features_from_polygon(uv):
+    # [Ref] 점 피처를 직접 스택한 s ∈ R^{2N}. 고전적 IBVS 점 피처와 
+    # 동일 철학 (Sec. 34.2.1; Eq. (34.11)~(34.12) 참조).
     return uv.reshape(-1)
 
 def get_features(pose_xyth, poly_w, fpx):
+    # [Ref] m(t)→s(t) 매핑: s = s(m(t), a) (Sec. 34.1, Eq. (34.1)).
     uv, _ = project_points_to_image(poly_w, pose_xyth, fpx)
     s = features_from_polygon(uv)
     return s, uv
 
 def feature_error(s, s_star):
+    # [Ref] e = s - s* (Sec. 34.1, Eq. (34.1)).
     return s - s_star
 
 # --- Pose update helper (camera twist in camera frame) ---
 def apply_cam_twist_to_pose(pose_xyth, d_cam):
+    # [Ref] 카메라 프레임 미소변위 d_cam=(dx_c,dy_c,dθ) 적용.
+    #      ṡ = L_s v_c 에서 v_c를 수치적으로 적분하는 역할 (Eq. (34.2)).
     x, y, th = pose_xyth
     dx_c, dy_c, dth = d_cam
     c, s = np.cos(th), np.sin(th)
@@ -69,8 +83,10 @@ def apply_cam_twist_to_pose(pose_xyth, d_cam):
 
 # --- Numeric interaction matrix for translation (2 DOF: x/y in cam frame) ---
 def numeric_interaction_matrix_3dof(pose_xyth, poly_w, fpx, eps_t=1e-4):
+    # [Ref] 상호작용행렬 L_s를 유한차분으로 근사한 L̂ (Sec. 34.2.2; also 주변 논의).
+    #      점 피처에 대한 해석 L은 Eq. (34.12)에 예시. 여기선 다점 스택이라 수치 근사 사용.
     s0, _ = get_features(pose_xyth, poly_w, fpx)     # dim = 2*N
-    L = np.zeros((s0.size, 2))                       # yaw is controlled separately
+    L = np.zeros((s0.size, 2))                       # yaw 별도 제어 → 번역 2자유도만
     deltas = [np.array([eps_t,0,0]), np.array([0,eps_t,0])]
     for j, d in enumerate(deltas):
         pose_p = apply_cam_twist_to_pose(pose_xyth, d)
@@ -101,22 +117,24 @@ feat_err_components = []   # [mean|duv|, max|duv|, |yaw_err|]
 
 # --- Main loop ---
 for step in range(TOTAL_STEPS):
+    # [Ref] 루프에서 s(t), e(t) 업데이트 (Eq. (34.1)).
     s, uv = get_features(camera_pose, poly_world, FOCAL_LENGTH)
 
     e = feature_error(s, desired_features)  # (10,)
     yaw_err = wrap_angle(camera_pose[2] - desired_pose[2])
 
-    # per-vertex pixel error magnitudes
+    # [Ref] duv 기반 개별 점 오차 통계(시각화용). 제어법칙에는 e만 사용.
     duv = (uv - desired_uv)                  # (5,2)
     per_pt = np.linalg.norm(duv, axis=1)     # (5,)
     mean_abs = float(np.mean(per_pt))
     max_abs  = float(np.max(per_pt))
 
+    # [Ref] 목표: ė = -λ e 가 되도록 v_c 선택 (Eq. (34.3)~(34.5)).
     error_norm = np.linalg.norm(e) + abs(yaw_err)
-
     error_history.append(error_norm)
     feat_err_components.append([mean_abs, max_abs, abs(yaw_err)])
 
+    # [Ref] λ 스케줄링 (휴리스틱): 큰 오차일 때 빠르고, 작아지면 안정적 (Eq. (34.6) 안정성 논의 주변).
     current_lambda = max(LAMBDA_MIN, min(LAMBDA_MAX, LAMBDA_MAX*(error_norm/50.0)))
 
     if error_norm < 1.0:
@@ -124,13 +142,16 @@ for step in range(TOTAL_STEPS):
         break
 
     # translation IBVS (x,y in cam frame)
+    # [Ref] v_trans = -λ L̂^+ e (Eq. (34.4)-(34.5)). 여기서 L̂은 수치 근사.
     L = numeric_interaction_matrix_3dof(camera_pose, poly_world, FOCAL_LENGTH)
     v_trans = -current_lambda * (np.linalg.pinv(L) @ e)   # (2,)
 
     # yaw control (separate P control)
+    # [Ref] 회전은 PBVS/2.5D 하이브리드 아이디어로 분리 제어 (Sec. 34.4.1, Eq. (34.27)~(34.28) 철학).
     v_yaw = -K_YAW * yaw_err
 
     # update pose
+    # [Ref] v_trans 는 카메라 프레임 속도 → 월드 합성/적분 (Eq. (34.2) 적용 관점).
     x, y, th = camera_pose
     c, s_ = np.cos(th), np.sin(th)
     vx_w = c*v_trans[0] - s_*v_trans[1]
@@ -154,7 +175,7 @@ ax1.set_xlabel("X (m)")
 ax1.set_ylabel("Y (m)")
 ax1.grid(True); ax1.set_aspect('equal')
 
-# 범위 계산: 카메라 경로 + 타겟 폴리곤 모두 포함
+# [Ref] 세계 경로/자세 시각화는 교재 Fig. 34.2~34.5류의 해석과 유사한 교육 목적.
 x_min, x_max = np.min(pose_history[:,0]), np.max(pose_history[:,0])
 y_min, y_max = np.min(pose_history[:,1]), np.max(pose_history[:,1])
 
@@ -186,6 +207,7 @@ ax1.plot(pose_history[:,0], pose_history[:,1], 'b--', lw=1, alpha=0.5, label="Fu
 current_path_plot, = ax1.plot([], [], 'b-', lw=2, label="Robot Path", animated=True)
 
 # Camera heading (quiver)
+# [Ref] 카메라 yaw(heading) 시각화.
 camera_quiver = ax1.quiver([0],[0],[0],[0],
                            angles='xy', scale_units='xy', scale=1.0,
                            color='r', label="Camera Pose", animated=True)
@@ -203,7 +225,8 @@ ax3.set_title("Feature Error & Yaw")
 ax3.set_xlabel("Time (s)")
 ax3.set_ylabel("Error")
 ax3.grid(True)
-feat_err_components[:,2]= np.rad2deg(feat_err_components[:,2])  # yaw error in degrees
+# [Ref] yaw 오차는 deg로 가독성 향상 (시각화 선택 사항).
+feat_err_components[:,2]= np.rad2deg(feat_err_components[:,2])
 line_err_norm, = ax3.plot(times, error_history, label="||e||")
 line_err_mean, = ax3.plot(times, feat_err_components[:,0], label="Mean |Δuv| [px]")
 line_err_max,  = ax3.plot(times, feat_err_components[:,1], label="Max |Δuv| [px]")
@@ -215,12 +238,12 @@ ax3.set_ylim(0, max(
         np.max(error_history),
         np.max(feat_err_components[:,0]),
         np.max(feat_err_components[:,1]),
-        np.max(feat_err_components[:,2])  # ← deg 기준
+        np.max(feat_err_components[:,2])  # deg
     ]) * 1.1
 ))
 
 def animate(i):
-    # World view path
+    # [Ref] 이미지/경로 시간 변화 해석은 Fig. 34.2~34.5류와 같은 교육 목적.
     current_path_plot.set_data(pose_history[:i+1, 0], pose_history[:i+1, 1])
 
     # Camera pose (quiver)
