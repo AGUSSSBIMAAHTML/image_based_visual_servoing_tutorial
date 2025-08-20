@@ -3,11 +3,12 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
 # --- Params ---
-LAMBDA = 2
 DT = 0.1
 SIM_TIME = 20
 TOTAL_STEPS = int(SIM_TIME / DT)
 FOCAL_LENGTH = 500.0
+LAMBDA_MAX, LAMBDA_MIN = 2.0, 0.5
+K_YAW = 0.5   # yaw proportional gain
 
 # --- Helpers (rotations) ---
 def wrap_angle(a: float) -> float:
@@ -19,164 +20,120 @@ def Rz(yaw: float) -> np.ndarray:
                      [-s,  c, 0.0],
                      [0.0, 0.0, 1.0]])
 
-# --- Geometry: circle (rim) in world, projected to image as ellipse ---
+# --- Geometry ---
 def make_rim_world(center_w, radius=0.5, tilt_rx_deg=20.0, tilt_ry_deg=5.0, n=200):
-    rx = np.deg2rad(tilt_rx_deg)
-    ry = np.deg2rad(tilt_ry_deg)
-    # tilt plane: Ry * Rx
+    rx = np.deg2rad(tilt_rx_deg); ry = np.deg2rad(tilt_ry_deg)
     c,s = np.cos, np.sin
     Rx = np.array([[1,0,0],[0,c(rx),-s(rx)],[0,s(rx),c(rx)]])
     Ry = np.array([[c(ry),0,s(ry)],[0,1,0],[-s(ry),0,c(ry)]])
     R_plane = Ry @ Rx
     t = np.linspace(0, 2*np.pi, n, endpoint=False)
     ring_local = np.stack([radius*np.cos(t), radius*np.sin(t), np.zeros_like(t)], axis=1)
-    pts_w = (R_plane @ ring_local.T).T + center_w
-    return pts_w  # (N,3)
+    return (R_plane @ ring_local.T).T + center_w
 
 def project_points_to_image(pts_w, pose_xyth, fpx):
-    """
-    pose_xyth = [x, y, theta], 카메라는 z축을 보는 pinhole, 피처 깊이 Z는 pts_w[:,2] 그대로 사용(상수 가정)
-    월드→카메라: yaw만; 카메라 z축이 월드 z축과 일치한다고 가정
-    """
     x, y, th = pose_xyth
     Rcw = Rz(th).T
-    tcw = -Rcw @ np.array([x, y, 0.0])  # z 이동은 안 씀(깊이 고정)
+    tcw = -Rcw @ np.array([x, y, 0.0])
     pts_c = (Rcw @ pts_w.T).T + tcw
-    X, Y, Z = pts_c[:,0], pts_c[:,1], pts_c[:,2]  # 여기서 Z는 world Z가 yaw 회전만 거친 값 → 상수 수준
-    u = fpx * (X / Z)
-    v = fpx * (Y / Z)
-    return np.stack([u, v], axis=1), Z
+    X, Y, Z = pts_c[:,0], pts_c[:,1], pts_c[:,2]
+    return np.stack([fpx*(X/Z), fpx*(Y/Z)], axis=1), Z
 
-def ellipse_from_points(uv):
-    """타원 파라미터 근사: 중심, 주/부 반지름(a,b ~ 표준편차 스케일), 기울기 alpha"""
+# --- Features (circle only) ---
+def circle_from_points(uv):
     u0, v0 = uv.mean(axis=0)
     duv = uv - np.array([u0, v0])
-    C = (duv.T @ duv) / max(uv.shape[0], 1)
-    evals, evecs = np.linalg.eigh(C)  # 작은->큰
-    idx = np.argsort(evals)[::-1]
-    evals = evals[idx]; evecs = evecs[:, idx]
-    a = np.sqrt(max(evals[0], 1e-12))
-    b = np.sqrt(max(evals[1], 1e-12))
-    alpha = wrap_angle(np.arctan2(evecs[1,0], evecs[0,0]))
-    return float(u0), float(v0), float(a), float(b), float(alpha)
+    r = np.sqrt(np.mean(np.sum(duv**2, axis=1)))
+    return float(u0), float(v0), float(r)
 
-def features_from_ellipse(u0, v0, a, b, alpha):
-    # s = [u0, v0, log(a*b), alpha]
-    return np.array([u0, v0, np.log(max(a*b, 1e-12)), alpha])
+def features_from_circle(u0, v0, r):
+    return np.array([u0, v0, np.log(max(r*r, 1e-12))])
 
 def get_features(pose_xyth, rim_w, fpx):
     uv, _ = project_points_to_image(rim_w, pose_xyth, fpx)
-    u0, v0, a, b, alpha = ellipse_from_points(uv)
-    return features_from_ellipse(u0, v0, a, b, alpha), uv
+    u0, v0, r = circle_from_points(uv)
+    return features_from_circle(u0, v0, r), uv
 
 def feature_error(s, s_star):
-    e = s - s_star
-    e[-1] = wrap_angle(e[-1])  # alpha 차이는 각도 wrap
-    return e
+    return s - s_star
 
-# --- Numeric L for 3-DoF (vx, vy, wz) ---
+# --- Interaction matrix ---
 def apply_cam_twist_to_pose(pose_xyth, d_cam):
-    """
-    카메라 프레임의 작은 twist [dx_cam, dy_cam, dtheta]를
-    월드 포즈 [x,y,theta]에 반영 (dt=1 근사)
-    """
     x, y, th = pose_xyth
     dx_c, dy_c, dth = d_cam
     c, s = np.cos(th), np.sin(th)
-    # cam->world 변환
     dx_w = c*dx_c - s*dy_c
     dy_w = s*dx_c + c*dy_c
     return np.array([x + dx_w, y + dy_w, wrap_angle(th + dth)])
 
-def numeric_interaction_matrix_3dof(pose_xyth, rim_w, fpx, eps_t=1e-4, eps_r=1e-4):
-    """
-    L ≈ ds/d[vx, vy, wz]  (z 고정)
-    작은 카메라 프레임 변위를 포즈에 적용하고 특성 변화율로 L의 각 열 근사
-    """
+def numeric_interaction_matrix_3dof(pose_xyth, rim_w, fpx, eps_t=1e-4):
     s0, _ = get_features(pose_xyth, rim_w, fpx)
-    L = np.zeros((s0.size, 3))
-    deltas = [
-        np.array([ eps_t, 0.0,   0.0]),  # +vx
-        np.array([ 0.0,   eps_t, 0.0]),  # +vy
-        np.array([ 0.0,   0.0,   eps_r]) # +wz
-    ]
+    L = np.zeros((s0.size, 2))  # yaw는 별도 제어하므로 2열만
+    deltas = [np.array([eps_t,0,0]), np.array([0,eps_t,0])]
     for j, d in enumerate(deltas):
         pose_p = apply_cam_twist_to_pose(pose_xyth, d)
         s1, _ = get_features(pose_p, rim_w, fpx)
         ds = s1 - s0
-        ds[-1] = wrap_angle(ds[-1])
-        step = d[j] if j < 2 else eps_r
+        step = eps_t
         L[:, j] = ds / step
     return L
 
 # --- Scenario (rim target) ---
-# 원형 림 중심과 깊이는 기존 코드의 Z=2.5를 그대로 사용
 rim_center_world = np.array([0.0, 0.0, 2.5])
 rim_world = make_rim_world(rim_center_world, radius=0.5, tilt_rx_deg=20.0, tilt_ry_deg=5.0, n=200)
-
-# 원하는(타겟) 피처: 카메라가 정면(yaw=0), x=y=0일 때의 타원
-desired_pose = np.array([0.0, 0.0, 0.0])  # [x, y, theta], z는 고정이므로 없음
+desired_pose = np.array([0.0, 0.0, 0.0])
 desired_features, desired_uv = get_features(desired_pose, rim_world, FOCAL_LENGTH)
 
-# 초기 포즈는 기존과 유사
-# camera_pose = np.array([-2.0, 2.0, np.deg2rad(45.0)])
-# 초기 포즈를 랜덤으로 설정
-np.random.seed()  # 매번 다른 결과
-init_x = np.random.uniform(-3.0, 3.0)       # X 범위
-init_y = np.random.uniform(-1.0, 4.0)       # Y 범위
-init_theta = np.random.uniform(-np.pi, np.pi)  # Yaw 각도
-
-camera_pose = np.array([init_x, init_y, init_theta])
+# 초기 pose
+np.random.seed()
+camera_pose = np.array([
+    np.random.uniform(-3.0, 3.0),
+    np.random.uniform(-1.0, 4.0),
+    np.random.uniform(-np.pi, np.pi)
+])
 
 # --- 기록 ---
 pose_history = [camera_pose.copy()]
-error_history = []      # ||e||2
-feature_history = []    # uv rim 샘플 찍기용
-feat_err_components = []  # |e_u0|, |e_v0|, |e_logab|, |e_alpha|
+error_history = []
+feature_history = []
+feat_err_components = []
 
-# --- 메인 루프 ---
+# --- Main loop ---
 for step in range(TOTAL_STEPS):
-    # 센싱: ellipse 피처
     s, uv = get_features(camera_pose, rim_world, FOCAL_LENGTH)
     feature_history.append(uv)
 
-    # 에러 계산 후
     e = feature_error(s, desired_features)
-    error_norm = np.linalg.norm(e)
-    error_history.append(error_norm)
-    feat_err_components.append(np.abs(e))
+    yaw_err = wrap_angle(camera_pose[2] - desired_pose[2])
+    error_norm = np.linalg.norm(e) + abs(yaw_err)
 
-    # 게인 스케줄링 (Gain Scheduling)
-    LAMBDA_MAX = 2.0
-    LAMBDA_MIN = 0.5
-    # 에러가 클 때(e.g., > 50)는 MAX, 작을 때(e.g., < 5)는 MIN으로 점차 감소
-    current_lambda = max(LAMBDA_MIN, min(LAMBDA_MAX, LAMBDA_MAX * (error_norm / 50.0)))
+    error_history.append(error_norm)
+    feat_err_components.append(np.hstack([np.abs(e), abs(yaw_err)]))
+
+    current_lambda = max(LAMBDA_MIN, min(LAMBDA_MAX, LAMBDA_MAX*(error_norm/50.0)))
 
     if error_norm < 1.0:
         print(f"목표 도달! {step*DT:.2f} 초 소요.")
         break
 
-    # 자코비안
+    # translation IBVS
     L = numeric_interaction_matrix_3dof(camera_pose, rim_world, FOCAL_LENGTH)
+    v_trans = -current_lambda * (np.linalg.pinv(L) @ e)
 
-    # 제어법칙: v_cam = -λ * L^+ * e
-    L_pinv = np.linalg.pinv(L)
-    # 수정된 람다 적용
-    v_cam = -current_lambda * (L_pinv @ e)
+    # yaw control (separate P control)
+    v_yaw = -K_YAW * yaw_err
 
-    # 포즈 적분: 카메라→월드 변환 후 x,y만, yaw는 그대로
+    # update pose
     x, y, th = camera_pose
     c, s = np.cos(th), np.sin(th)
-    vx_w = c*v_cam[0] - s*v_cam[1]
-    vy_w = s*v_cam[0] + c*v_cam[1]
-    dth  = v_cam[2]
-
-    camera_pose = np.array([x + vx_w*DT, y + vy_w*DT, wrap_angle(th + dth*DT)])
+    vx_w = c*v_trans[0] - s*v_trans[1]
+    vy_w = s*v_trans[0] + c*v_trans[1]
+    camera_pose = np.array([x + vx_w*DT, y + vy_w*DT, wrap_angle(th + v_yaw*DT)])
     pose_history.append(camera_pose.copy())
 
 pose_history = np.array(pose_history)
 error_history = np.array(error_history)
-feature_history = np.array(feature_history, dtype=object)  # list of arrays
+feature_history = np.array(feature_history, dtype=object)
 feat_err_components = np.array(feat_err_components)
 
 # --- 시각화 ---
@@ -256,7 +213,6 @@ line_err_norm, = ax3.plot(times, error_history, label="||e||")
 line_err_u, = ax3.plot(times, feat_err_components[:,0], label="|u0 - u0*| [px]")
 line_err_v, = ax3.plot(times, feat_err_components[:,1], label="|v0 - v0*| [px]")
 line_err_area, = ax3.plot(times, feat_err_components[:,2], label="|log(ab)-log(ab)*|")
-line_err_alpha, = ax3.plot(times, np.rad2deg(feat_err_components[:,3]), label="|alpha-alpha*| [deg]")
 ax3.legend()
 # Y축 범위는 전체 에러 기록을 바탕으로 설정
 ax3.set_ylim(0, max(1.0, np.max(error_history)*1.1))
@@ -287,11 +243,10 @@ def animate(i):
     line_err_u.set_data(t_i, feat_err_components[:i+1, 0])
     line_err_v.set_data(t_i, feat_err_components[:i+1, 1])
     line_err_area.set_data(t_i, feat_err_components[:i+1, 2])
-    line_err_alpha.set_data(t_i, np.rad2deg(feat_err_components[:i+1, 3]))
 
     return (current_path_plot, camera_arrow, peg_body_plot,
             current_rim_plot, line_err_norm, line_err_u,
-            line_err_v, line_err_area, line_err_alpha)
+            line_err_v, line_err_area)
 
 # 애니메이션 실행
 ani = FuncAnimation(fig, animate, frames=len(pose_history), interval=DT*1000, 

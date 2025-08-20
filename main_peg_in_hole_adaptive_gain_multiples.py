@@ -38,25 +38,24 @@ def project_points_to_image(pts_w, pose_xyth, fpx):
     X, Y, Z = pts_c[:,0], pts_c[:,1], pts_c[:,2]
     return np.stack([fpx*(X/Z), fpx*(Y/Z)], axis=1), Z
 
-def ellipse_from_points(uv):
+def circle_from_points(uv):
+    """Force fitted circle instead of ellipse"""
     u0, v0 = uv.mean(axis=0)
     duv = uv - np.array([u0, v0])
-    C = (duv.T @ duv) / max(uv.shape[0], 1)
-    evals, evecs = np.linalg.eigh(C)
-    idx = np.argsort(evals)[::-1]; evals, evecs = evals[idx], evecs[:, idx]
-    a, b = np.sqrt(np.maximum(evals, 1e-12))
-    alpha = wrap_angle(np.arctan2(evecs[1,0], evecs[0,0]))
-    return float(u0), float(v0), float(a), float(b), float(alpha)
+    r = np.sqrt(np.mean(np.sum(duv**2, axis=1)))
+    return float(u0), float(v0), float(r)
 
-def features_from_ellipse(u0,v0,a,b,alpha):
-    return np.array([u0, v0, np.log(max(a*b, 1e-12)), alpha])
+def features_from_circle(u0, v0, r):
+    # orientation 제거 → feature = [u0, v0, log(r^2)]
+    return np.array([u0, v0, np.log(max(r*r, 1e-12))])
 
 def get_features(pose_xyth, rim_w, fpx):
-    uv,_ = project_points_to_image(rim_w, pose_xyth, fpx)
-    return features_from_ellipse(*ellipse_from_points(uv)), uv
+    uv, _ = project_points_to_image(rim_w, pose_xyth, fpx)
+    return features_from_circle(*circle_from_points(uv)), uv
 
 def feature_error(s, s_star):
-    e = s - s_star; e[-1] = wrap_angle(e[-1]); return e
+    # circle 기반 → yaw는 따로 다룸
+    return s - s_star
 
 # --- Interaction matrix ---
 def apply_cam_twist_to_pose(pose_xyth, d_cam):
@@ -99,15 +98,35 @@ def simulate_ibvs(k: int = 5):
         for step in range(TOTAL_STEPS):
             s, uv = get_features(camera_pose, rim_world, FOCAL_LENGTH)
             feature_history.append(uv)
+
+            # circle feature error
             e = feature_error(s, desired_features)
-            error_norm = np.linalg.norm(e)
+
+            # yaw 오차 추가 (state 기반)
+            yaw_err = wrap_angle(camera_pose[2] - desired_pose[2])
+
+            error_norm = np.linalg.norm(e) + abs(yaw_err)
             lam = max(LAMBDA_MIN, min(LAMBDA_MAX, LAMBDA_MAX*(error_norm/50)))
-            if error_norm < 1.0: break
+
+            if error_norm < 1.0:
+                break
+
+            # interaction matrix (이제 3x2만 유효 → tx, ty / yaw 따로)
             L = numeric_interaction_matrix_3dof(camera_pose, rim_world, FOCAL_LENGTH)
-            v_cam = -lam * (np.linalg.pinv(L) @ e)
-            x,y,th = camera_pose; c,s = np.cos(th), np.sin(th)
-            vx_w = c*v_cam[0]-s*v_cam[1]; vy_w = s*v_cam[0]+c*v_cam[1]; dth=v_cam[2]
-            camera_pose = np.array([x+vx_w*DT, y+vy_w*DT, wrap_angle(th+dth*DT)])
+            # L 크기 맞춰서 translation만 학습
+            L = L[:3, :2]   # [u0,v0,log(r^2)] wrt [tx,ty]
+
+            v_trans = -lam * (np.linalg.pinv(L) @ e)  # 2D translation velocity
+            v_yaw   = -lam * 0.5 * yaw_err            # yaw velocity (gain 0.5 임의)
+
+            x,y,th = camera_pose
+            c,s = np.cos(th), np.sin(th)
+            vx_w = c*v_trans[0] - s*v_trans[1]
+            vy_w = s*v_trans[0] + c*v_trans[1]
+
+            camera_pose = np.array([x+vx_w*DT,
+                                    y+vy_w*DT,
+                                    wrap_angle(th+v_yaw*DT)])
             pose_history.append(camera_pose.copy())
 
         all_pose_histories.append(np.array(pose_history))
@@ -127,10 +146,19 @@ def simulate_ibvs(k: int = 5):
     # Axis auto scale
     all_x = np.concatenate([ph[:,0] for ph in all_pose_histories])
     all_y = np.concatenate([ph[:,1] for ph in all_pose_histories])
+
+    # margin 계산
     mx = 0.1 * (np.ptp(all_x) if np.ptp(all_x) > 0 else 1.0)
     my = 0.1 * (np.ptp(all_y) if np.ptp(all_y) > 0 else 1.0)
-    ax1.set_xlim(all_x.min()-mx, all_x.max()+mx)
-    ax1.set_ylim(all_y.min()-my, all_y.max()+my)
+    m = max(mx, my)  # 둘 중 큰 값
+
+    # range 계산 (둘 다 같은 크기로 맞추기)
+    x_center = 0.5 * (all_x.min() + all_x.max())
+    y_center = 0.5 * (all_y.min() + all_y.max())
+    half_range = 0.5 * max(all_x.max()-all_x.min(), all_y.max()-all_y.min()) + m
+
+    ax1.set_xlim(x_center - half_range, x_center + half_range)
+    ax1.set_ylim(y_center - half_range, y_center + half_range)
 
     # Rim
     theta = np.linspace(0,2*np.pi,200)
@@ -141,8 +169,6 @@ def simulate_ibvs(k: int = 5):
     # Artists
     path_line, = ax1.plot([],[],'b-',lw=2,label="Path")
     peg_line,  = ax1.plot([],[],'m-',lw=2,label="Gripper Peg")
-    # camera_arrow = ax1.quiver([],[],[],[],color='r',angles='xy',
-    #                           scale_units='xy',scale=1,width=0.01,label="Camera Heading")
     camera_arrow = ax1.quiver([0], [0], [1], [0],
                             color='r', angles='xy',
                             scale_units='xy', scale=1, width=0.02)
