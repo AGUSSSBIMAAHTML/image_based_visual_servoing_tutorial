@@ -82,6 +82,7 @@ def apply_cam_twist_to_pose(pose_xyth, d_cam):
     return np.array([x + dx_w, y + dy_w, wrap_angle(th + dth)])
 
 # --- Numeric interaction matrix for translation (2 DOF: x/y in cam frame) ---
+#  derivation; https://chatgpt.com/share/68a69575-8298-800e-a46a-dc2540e7400d
 def numeric_interaction_matrix_3dof(pose_xyth, poly_w, fpx, eps_t=1e-4):
     # [Ref] 상호작용행렬 L_s를 유한차분으로 근사한 L̂ (Sec. 34.2.2; also 주변 논의).
     #      점 피처에 대한 해석 L은 Eq. (34.12)에 예시. 여기선 다점 스택이라 수치 근사 사용.

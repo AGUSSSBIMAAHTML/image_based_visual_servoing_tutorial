@@ -83,6 +83,7 @@ def apply_cam_twist_4d(pose_xyzyaw: np.ndarray, d_cam: np.ndarray) -> np.ndarray
 # ============================================================
 # Numeric interaction matrix split: L_v (vx,vy,vz), L_w (wz)
 # ============================================================
+#  derivation; https://chatgpt.com/share/68a69575-8298-800e-a46a-dc2540e7400d
 def numeric_L_split_v_and_wz(pose_xyzyaw, poly_w, fpx, eps=1e-4):
     s0, _, _ = get_features(pose_xyzyaw, poly_w, fpx)
     dim = s0.size

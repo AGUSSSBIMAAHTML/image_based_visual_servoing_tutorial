@@ -69,6 +69,7 @@ def feature_error(s, s_star):
     return s - s_star
 
 # --- Interaction matrix ---
+#  derivation; https://chatgpt.com/share/68a69575-8298-800e-a46a-dc2540e7400d
 def apply_cam_twist_to_pose(pose_xyth, d_cam):
     # [Ref] 카메라 프레임의 미소 변위 d_cam = (dx_c, dy_c, dθ) 를 월드로 적분.
     #       ṡ = L_s v_c 의 v_c 적용을 수치적으로 흉내내는 구성 (Eq. (34.2)).
